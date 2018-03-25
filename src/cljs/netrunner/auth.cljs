@@ -6,12 +6,35 @@
             [netrunner.appstate :refer [app-state]]
             [netrunner.ajax :refer [POST GET]]))
 
-(defn avatar [{:keys [emailhash]} owner opts]
+
+(defn handle-post [event owner url ref]
+  (.preventDefault event)
+  (om/set-state! owner :flash-message "")
+  (let [params (-> event .-target js/$ .serialize)
+        _ (.-serialize (js/$ (.-target event)))] ;; params is nil when built in :advanced mode. This fixes the issue.
+    (go (let [response (<! (POST url params))]
+          (if (and (= (:status response) 200) (= (:owner "/forgot") "/forgot") )
+            (om/set-state! owner :flash-message "Reset password sent")
+            (case (:status response)
+              401 (om/set-state! owner :flash-message "Invalid login or password")
+              421 (om/set-state! owner :flash-message "No account with that email address exists")
+              422 (om/set-state! owner :flash-message "Username taken")
+              423 (om/set-state! owner :flash-message "Username too long")
+              424 (om/set-state! owner :flash-message "Email already used")
+              (-> js/document .-location (.reload true))))))))
+
+(defn handle-logout [event owner]
+  (.preventDefault event)
+  (go (let [response (<! (POST "/logout" nil))]
+        (-> js/document .-location (.reload true)))))
+
+(defn avatar [{:keys [emailhash username]} owner opts]
   (om/component
    (sab/html
     (when emailhash
       [:img.avatar
-       {:src (str "https://www.gravatar.com/avatar/" emailhash "?d=retro&s=" (:size opts))}]))))
+       {:src (str "https://www.gravatar.com/avatar/" emailhash "?d=retro&s=" (:size opts))
+        :alt username}]))))
 
 (defn authenticated [f]
   (if-let [user (:user @app-state)]
@@ -28,8 +51,8 @@
         (:username user)
         [:b.caret]]
        [:div.dropdown-menu.blue-shade.float-right
-        [:a.block-link {:href "/account"} "My Account"]
-        [:a.block-link {:href "/logout"} "Logout"]]]])))
+        [:a.block-link {:href "/account"} "Settings"]
+        [:a.block-link {:on-click #(handle-logout % owner)} "Logout"]]]])))
 
 (defn unlogged-menu [user owner]
   (om/component
@@ -47,20 +70,6 @@
      (om/build logged-menu user)
      (om/build unlogged-menu user))))
 
-(defn handle-post [event owner url ref]
-  (.preventDefault event)
-  (om/set-state! owner :flash-message "")
-  (let [params (-> event .-target js/$ .serialize)
-        _ (.-serialize (js/$ (.-target event)))] ;; params is nil when built in :advanced mode. This fixes the issue.
-    (go (let [response (<! (POST url params))]
-          (if (and (= (:status response) 200) (= (:owner "/forgot") "/forgot") )
-            (om/set-state! owner :flash-message "Reset password sent")
-            (case (:status response)
-                401 (om/set-state! owner :flash-message "Invalid login or password")
-                421 (om/set-state! owner :flash-message "No account with that email address exists")
-                422 (om/set-state! owner :flash-message "Username taken")
-                423 (om/set-state! owner :flash-message "Username too short/too long")
-                (-> js/document .-location (.reload true))))))))
 
 (defn check-username [event owner]
   (go (let [response (<! (GET (str "/check/" (.-value (om/get-node owner "username")))))]
@@ -75,6 +84,10 @@
           (om/set-state! owner :flash-message "No account with that email address exists")
           (om/set-state! owner :flash-message "")))))
 
+(defn valid-email? [email]
+  (let [pattern #"[a-z0-9!#$%&'*+/=?^_`{|}~-]+(?:\.[a-z0-9!#$%&'*+/=?^_`{|}~-]+)*@(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+[a-z0-9](?:[a-z0-9-]*[a-z0-9])?"]
+    (and (string? email) (re-matches pattern (.toLowerCase email)))))
+
 (defn register [event owner]
   (.preventDefault event)
   (let [username (.-value (om/get-node owner "username"))
@@ -83,8 +96,8 @@
     (cond
       (empty? email) (om/set-state! owner :flash-message "Email can't be empty")
       (empty? username) (om/set-state! owner :flash-message "Username can't be empty")
-      (> 4 (count username)) (om/set-state! owner :flash-message "Username must be 4 characters or longer")
-      (< 16 (count username)) (om/set-state! owner :flash-message "Username must be 16 characters or shorter")
+      (not (valid-email? email)) (om/set-state! owner :flash-message "Please enter a valid email address")
+      (< 20 (count username)) (om/set-state! owner :flash-message "Username must be 20 characters or shorter")
       (empty? password) (om/set-state! owner :flash-message "Password can't be empty")
       :else (handle-post event owner "/register" "register-form"))))
 
@@ -101,7 +114,9 @@
          [:h3 "Create an account"]
          [:p.flash-message (:flash-message state)]
          [:form {:on-submit #(register % owner)}
-          [:p [:input {:type "text" :placeholder "Email" :name "email" :ref "email"}]]
+          [:p [:input {:type "text" :placeholder "Email" :name "email" :ref "email"
+                       :on-blur #(when-not (valid-email? (.. % -target -value))
+                                   (om/set-state! owner :flash-message "Please enter a valid email address"))}]]
           [:p [:input {:type "text" :placeholder "Username" :name "username" :ref "username"
                        :on-blur #(check-username % owner) :maxLength "16"}]]
           [:p [:input {:type "password" :placeholder "Password" :name "password" :ref "password"}]]

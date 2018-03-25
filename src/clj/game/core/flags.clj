@@ -175,9 +175,6 @@
 
 ;;; Functions for preventing specific game actions.
 ;;; TODO: look into migrating these to turn-flags and run-flags.
-(defn prevent-run [state side]
-  (swap! state assoc-in [:runner :register :cannot-run] true))
-
 (defn prevent-draw [state side]
   (swap! state assoc-in [:runner :register :cannot-draw] true))
 
@@ -197,6 +194,11 @@
 (defn release-zone [state side cid tside tzone]
   (swap! state update-in [tside :locked tzone] #(remove #{cid} %)))
 
+(defn lock-install [state side cid tside]
+  (swap! state update-in [tside :lock-install] #(conj % cid)))
+
+(defn unlock-install [state side cid tside]
+  (swap! state update-in [tside :lock-install] #(remove #{cid} %)))
 
 ;;; Small utilities for card properties.
 (defn in-server?
@@ -218,6 +220,11 @@
   "Checks if the specified card is in the scored area of the specified player."
   [state side card]
   (some #(= (:cid %) (:cid card)) (get-in @state [side :scored])))
+
+(defn when-scored?
+  "Checks if the specified card is able to be used for a when-scored text ability"
+  [card]
+  (not (:not-when-scored (card-def card))))
 
 (defn in-deck?
   "Checks if the specified card is in the draw deck."
@@ -250,17 +257,35 @@
   [card subtype]
   (has? card :subtype subtype))
 
+(defn can-host?
+  "Checks if the specified card is able to host other cards"
+  [card]
+  (or (not (rezzed? card)) (not (:cannot-host (card-def card)))))
+
 (defn ice? [card]
   (is-type? card "ICE"))
+
+(defn program? [card]
+  (is-type? card "Program"))
+
+(defn hardware? [card]
+  (is-type? card "Hardware"))
+
+(defn resource? [card]
+  (is-type? card "Resource"))
 
 (defn rezzed? [card]
   (:rezzed card))
 
+(defn faceup? [card]
+  (or (:seen card) (:rezzed card)))
+
 (defn installed? [card]
   (or (:installed card) (= :servers (first (:zone card)))))
 
-(defn active? [{:keys [zone] :as card}]
+(defn active?
   "Checks if the card is active and should receive game events/triggers."
+  [{:keys [zone] :as card}]
   (or (is-type? card "Identity")
       (= zone [:current])
       (and (card-is? card :side :corp)
@@ -270,9 +295,16 @@
            (installed? card)
            (not (facedown? card)))))
 
-;; This appears unused, can it be removed?
 (defn untrashable-while-rezzed? [card]
   (and (card-flag? card :untrashable-while-rezzed true) (rezzed? card)))
+
+(defn untrashable-while-resources? [card]
+  (and (card-flag? card :untrashable-while-resources true) (installed? card)))
+
+(defn install-locked?
+  "Checks if installing is locked"
+  [state side]
+  (seq (get-in @state [side :lock-install])))
 
 (defn- can-rez-reason
   "Checks if the corp can rez the card.
@@ -301,7 +333,7 @@
 (defn can-rez?
   "Checks if the card can be rezzed. Toasts the reason if not."
   ([state side card] (can-rez? state side card nil))
-  ([state side card _]
+  ([state side card {:keys [ignore-unique] :as args}]
    (let [reason (can-rez-reason state side card)
          reason-toast #(do (toast state side %) false)
          title (:title card)]
@@ -314,15 +346,26 @@
        :run-flag false
        :turn-flag false
        ;; Uniqueness
-       :unique (reason-toast (str "Cannot rez a second copy of " title " since it is unique. Please trash the other"
-                                  " copy first"))
+       :unique (or ignore-unique
+                   (reason-toast (str "Cannot rez a second copy of " title " since it is unique. Please trash the other"
+                                      " copy first")))
        ;; Rez requirement
        :req (reason-toast (str "Rez requirements for " title " are not fulfilled"))))))
 
 (defn can-steal?
   "Checks if the runner can steal agendas"
   [state side card]
-  (check-flag-types? state side card :can-steal [:current-turn :current-run]))
+  (and (check-flag-types? state side card :can-steal [:current-turn :current-run])
+       (check-flag-types? state side card :can-steal [:current-turn :persistent])))
+
+(defn can-run?
+  "Checks if the runner is allowed to run"
+  [state side]
+  (let [cards (->> @state :stack :current-turn :can-run (map :card))]
+    (if (empty? cards)
+      true
+      (do (toast state side (str "Cannot run due to " (join ", " (map :title cards))))
+        false))))
 
 (defn can-access?
   "Checks if the runner can access the specified card"
